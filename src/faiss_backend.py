@@ -1,8 +1,3 @@
-"""
-FAISS Backend API for RAG System
-Provides efficient similarity search using Facebook AI Similarity Search (FAISS)
-"""
-
 import numpy as np
 import pandas as pd
 import faiss
@@ -19,7 +14,7 @@ class FAISS_Backend:
         Initialize FAISS backend.
         
         Args:
-            embedding_dim: Dimension of embeddings (default 1536 for OpenAI text-embedding-3-small)
+            embedding_dim: Dimension of embeddings (default 1536 for text-embedding-3-small)
         """
         self.embedding_dim = embedding_dim
         self.index = None
