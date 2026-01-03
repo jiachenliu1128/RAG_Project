@@ -18,7 +18,7 @@ from rag_system import (
 # =============================================================================
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)  
 
 # Configuration
 DATA_DIR = "./data"

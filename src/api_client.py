@@ -16,8 +16,6 @@ class RAG_API_Client:
         self.base_url = base_url
         self.api_prefix = f"{base_url}/api"
     
-    # System Management
-    
     def health_check(self) -> Dict:
         """Check API server health."""
         response = requests.get(f"{self.api_prefix}/health")
@@ -42,8 +40,6 @@ class RAG_API_Client:
         response.raise_for_status()
         return response.json()
     
-    # Embedding Operations
-    
     def embed_text(self, text: str) -> List[float]:
         """
         Generate embedding for text.
@@ -61,8 +57,6 @@ class RAG_API_Client:
         response.raise_for_status()
         data = response.json()
         return data['embedding']
-    
-    # Search Operations
     
     def search(self, query: str, k: int = 5) -> List[Dict]:
         """
@@ -102,8 +96,6 @@ class RAG_API_Client:
         data = response.json()
         return data['results']
     
-    # QA Operations
-    
     def query(self, question: str, k: int = 5) -> Tuple[str, str]:
         """
         Answer a question using RAG.
@@ -122,9 +114,7 @@ class RAG_API_Client:
         response.raise_for_status()
         data = response.json()
         return data['prompt'], data['answer']
-    
-    # Document Operations
-    
+        
     def get_document(self, doc_id: int) -> Dict:
         """Get document by ID."""
         response = requests.get(f"{self.api_prefix}/documents/{doc_id}")
@@ -141,9 +131,11 @@ class RAG_API_Client:
         return response.json()
 
 
+
+
+
+
 def main():
-    """Example usage of the RAG API client."""
-    
     # Initialize client
     client = RAG_API_Client()
     
