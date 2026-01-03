@@ -5,6 +5,7 @@ import tiktoken
 import json
 from transformers import GPT2TokenizerFast
 import dotenv
+from faiss_backend import FAISS_Backend
 
 # =============================================================================
 # Configuration
@@ -31,48 +32,6 @@ COMPLETIONS_API_PARAMS = {
 # Context retrieval parameters
 MAX_SECTION_LEN = 1000
 SEPARATOR = "\n* "
-
-
-
-
-# =============================================================================
-# Utility Functions
-# =============================================================================
-
-def num_tokens(text: str, model: str = "gpt-4") -> int:
-    """Return the number of tokens in a string."""
-    encoding = tiktoken.encoding_for_model(model)
-    return len(encoding.encode(text))
-
-
-def get_embedding(text: str, model: str = EMBEDDING_MODEL):
-    """Convert text into an embedding vector using the OpenAI Embeddings API."""
-    resp = client.embeddings.create(model=model, input=text)
-    return resp.data[0].embedding
-
-
-def compute_doc_embeddings(df: pd.DataFrame):
-    """
-    Create an embedding for each row in the dataframe using the OpenAI Embeddings API.
-    
-    Args:
-        df: DataFrame with a 'context' column containing text to embed
-        
-    Returns:
-        Dictionary mapping row index -> embedding vector
-    """
-    embeddings = {}
-    for idx, row in df.iterrows():
-        embeddings[idx] = get_embedding(str(row.get('context', '')))
-    return embeddings
-
-
-def jsonKeys2int(x):
-    """Convert JSON object keys from strings to integers."""
-    if isinstance(x, dict):
-        return {int(k): v for k, v in x.items()}
-    return x
-
 
 
 
@@ -105,6 +64,12 @@ def create_context_column(df: pd.DataFrame) -> pd.DataFrame:
             f"Heading4: {str(row['heading4']).strip()}\n" + \
             f"Content: {str(row['content']).strip()}"
     return df
+
+
+def num_tokens(text: str, model: str = "gpt-4") -> int:
+    """Return the number of tokens in a string."""
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
 
 
 # def generate_questions_for_context(context: str) -> str:
@@ -179,11 +144,50 @@ def preprocess_dataset(df: pd.DataFrame, output_csv: str) -> pd.DataFrame:
     return df
 
 
+
+
+
+
+
+
+# =============================================================================
+# Functions for Document Embeddings
+# =============================================================================
+
+def get_embedding(text: str, model: str = EMBEDDING_MODEL):
+    """Convert text into an embedding vector using the OpenAI Embeddings API."""
+    resp = client.embeddings.create(model=model, input=text)
+    return resp.data[0].embedding
+
+
+def compute_doc_embeddings(df: pd.DataFrame):
+    """
+    Create an embedding for each row in the dataframe using the OpenAI Embeddings API.
+    
+    Args:
+        df: DataFrame with a 'context' column containing text to embed
+        
+    Returns:
+        Dictionary mapping row index -> embedding vector
+    """
+    embeddings = {}
+    for idx, row in df.iterrows():
+        embeddings[idx] = get_embedding(str(row.get('context', '')))
+    return embeddings
+
+
 def save_embeddings(embeddings: dict, filepath: str):
     """Save embeddings to JSON file."""
     with open(filepath, 'w') as fp:
         json.dump(embeddings, fp)
     print(f"Embeddings saved to {filepath}")
+    
+    
+def jsonKeys2int(x):
+    """Convert JSON object keys from strings to integers."""
+    if isinstance(x, dict):
+        return {int(k): v for k, v in x.items()}
+    return x
 
 
 def load_embeddings(filepath: str) -> dict:
@@ -198,8 +202,9 @@ def load_embeddings(filepath: str) -> dict:
 
 
 
+
 # =============================================================================
-# Retrieval and Similarity Functions
+# Retrieval and Similarity
 # =============================================================================
 
 def vector_similarity(x, y):
@@ -212,7 +217,11 @@ def vector_similarity(x, y):
     return np.dot(np.array(x), np.array(y))
 
 
-def order_document_sections_by_query_similarity(query: str, contexts: dict):
+def order_document_sections_by_query_similarity(
+    query: str, 
+    contexts: dict = None, 
+    faiss_backend: FAISS_Backend = None
+) -> list:
     """
     Find the query embedding for the supplied query, and compare it against all
     of the pre-calculated document embeddings to find the most relevant sections.
@@ -220,16 +229,21 @@ def order_document_sections_by_query_similarity(query: str, contexts: dict):
     Args:
         query: User query string
         contexts: Dictionary of document embeddings
+        faiss_backend: FAISSBackend instance with indexed embeddings (optional)
         
     Returns:
         List of (similarity_score, doc_index) tuples sorted by relevance (descending)
     """
     query_embedding = get_embedding(query)
     
-    document_similarities = sorted([
-        (vector_similarity(query_embedding, doc_embedding), doc_index)
-        for doc_index, doc_embedding in contexts.items()
-    ], reverse=True)
+    if faiss_backend is not None:
+        document_similarities = faiss_backend.search(query_embedding)
+        document_similarities = [(score, doc_id) for doc_id, score in document_similarities]
+    else:
+        document_similarities = sorted([
+            (vector_similarity(query_embedding, doc_embedding), doc_index)
+            for doc_index, doc_embedding in contexts.items()
+        ], reverse=True)
     
     return document_similarities
 
@@ -244,7 +258,12 @@ def order_document_sections_by_query_similarity(query: str, contexts: dict):
 # Prompt Construction
 # =============================================================================
 
-def construct_prompt(question: str, context_embeddings: dict, df: pd.DataFrame) -> str:
+def construct_prompt(
+    question: str, 
+    df: pd.DataFrame, 
+    context_embeddings: dict = None, 
+    faiss_backend: FAISS_Backend = None
+) -> str:
     """
     Construct a prompt by retrieving relevant document sections and prepending them
     to the query.
@@ -253,12 +272,13 @@ def construct_prompt(question: str, context_embeddings: dict, df: pd.DataFrame) 
         question: User's question
         context_embeddings: Dictionary of document embeddings
         df: DataFrame with document content and token counts
+        faiss_backend: FAISSBackend instance with indexed embeddings (optional)
         
     Returns:
         Constructed prompt with context and question
     """
     most_relevant_document_sections = order_document_sections_by_query_similarity(
-        question, context_embeddings
+        question, context_embeddings, faiss_backend
     )
     
     chosen_sections = []
@@ -296,13 +316,14 @@ def construct_prompt(question: str, context_embeddings: dict, df: pd.DataFrame) 
 
 
 # =============================================================================
-# Question Answering
+# ChatGPT Interaction
 # =============================================================================
 
 def answer_query_with_context(
     query: str,
     df: pd.DataFrame,
-    document_embedding: dict,
+    document_embedding: dict = None,
+    faiss_backend: FAISS_Backend = None,
     show_prompt: bool = False
 ) -> str:
     """
@@ -312,12 +333,16 @@ def answer_query_with_context(
         query: User's question
         df: DataFrame with document content
         document_embedding: Dictionary of document embeddings
+        faiss_backend: FAISS_Backend instance with indexed embeddings
         show_prompt: If True, print the constructed prompt
         
     Returns:
         Answer string generated by GPT
     """
-    prompt = construct_prompt(query, document_embedding, df)
+    if document_embedding is None and faiss_backend is None:
+        raise ValueError("Either document_embedding or faiss_backend must be provided.")
+    
+    prompt = construct_prompt(query, df, document_embedding, faiss_backend)
     
     if show_prompt:
         print(prompt)
@@ -327,7 +352,9 @@ def answer_query_with_context(
         **COMPLETIONS_API_PARAMS
     )
     
-    return response.choices[0].message.content.strip(" \n")
+    return (response.choices[0].message.content.strip(" \n"), prompt)
+
+
 
 
 
@@ -342,9 +369,9 @@ def main():
     """Main execution function."""
     
     # Paths
-    data_dir = "../data"
+    data_dir = "./data"
     csv_path = f"{data_dir}/Series4000.csv"
-    qa_csv_path = f"{data_dir}/selling_qa.csv"
+    processed_csv_path = f"{data_dir}/Series4000_processed.csv"
     embeddings_path = f"{data_dir}/embeddings.json"
     
     # Load data
@@ -353,7 +380,7 @@ def main():
     
     # Preprocess dataset (create context, generate Q&A)
     print("\nPreprocessing dataset...")
-    df = preprocess_dataset(df, qa_csv_path)
+    df = preprocess_dataset(df, processed_csv_path)
     
     # Compute and save embeddings
     print("\nComputing embeddings...")
@@ -370,8 +397,6 @@ def main():
     print("="*80)
     
     test_queries = [
-        "Can I use premium financing to fund the down payment?",
-        "Can I use premium financing to fund closing costs and prepaids?",
         "What is the required use of Form 65?",
         "What are the Seller's formatting options for Form 65?",
         "What are the translation aids for Form 65?",
@@ -380,7 +405,7 @@ def main():
     
     for query in test_queries:
         print(f"\nQ: {query}")
-        answer = answer_query_with_context(query, df, document_embeddings)
+        answer, prompt = answer_query_with_context(query, df, document_embeddings)
         print(f"A: {answer}")
         print("-" * 80)
 
