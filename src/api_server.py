@@ -1,8 +1,9 @@
+import os
+import platform
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
-import os
 import json
 from functools import wraps
 
@@ -13,10 +14,20 @@ from rag_system import (
 )
 
 
+# Avoid macOS libomp duplicate runtime crash when faiss/numpy load OpenMP
+if platform.system() == "Darwin":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+
+
+
+
 # =============================================================================
 # Flask App Setup
 # =============================================================================
 
+# Initialize Flask app
 app = Flask(__name__)
 CORS(app)  
 
@@ -493,7 +504,6 @@ if __name__ == '__main__':
     os.makedirs(DATA_DIR, exist_ok=True)
     
     print("Starting RAG API Server...")
-    print(f"API Health Check: http://localhost:5000/api/health")
     
     # Run Flask app
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)
