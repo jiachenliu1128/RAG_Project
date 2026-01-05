@@ -492,8 +492,8 @@ if __name__ == '__main__':
     # Ensure data directory exists
     os.makedirs(DATA_DIR, exist_ok=True)
     
-    print("Starting RAG API Server with FAISS Backend...")
-    print(f"API Documentation: http://localhost:5000/api/health")
+    print("Starting RAG API Server...")
+    print(f"API Health Check: http://localhost:5000/api/health")
     
     # Run Flask app
     app.run(debug=True, host='0.0.0.0', port=5000)
