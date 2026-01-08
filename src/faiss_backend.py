@@ -1,9 +1,16 @@
+import os
+import platform
 import numpy as np
 import pandas as pd
 import faiss
 import json
 from typing import List, Tuple, Dict
-import os
+
+
+# Avoid macOS libomp duplicate runtime crash when faiss/numpy load OpenMP
+if platform.system() == "Darwin":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 
 class FAISS_Backend:

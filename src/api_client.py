@@ -6,15 +6,16 @@ from typing import List, Dict, Tuple, Optional
 class RAG_API_Client:
     """Client for interacting with RAG API server."""
     
-    def __init__(self, base_url: str = "http://localhost:5000"):
+    def __init__(self, host = "localhost", port = 5000):
         """
         Initialize the RAG API client.
         
         Args:
-            base_url: Base URL of the API server
+            host: Hostname of the API server
+            port: Port number of the API server
         """
-        self.base_url = base_url
-        self.api_prefix = f"{base_url}/api"
+        self.base_url = f"http://{host}:{port}"
+        self.api_prefix = f"{self.base_url}/api"
     
     def health_check(self) -> Dict:
         """Check API server health."""
@@ -137,7 +138,7 @@ class RAG_API_Client:
 
 def main():
     # Initialize client
-    client = RAG_API_Client()
+    client = RAG_API_Client(host="0.0.0.0", port=5001)
     
     # Health check
     print("Checking API health...")
@@ -151,36 +152,42 @@ def main():
         print(f"Init result: {init_result}")
     except Exception as e:
         print(f"System already initialized or error: {e}")
+        
+    # Set question
+    question = "What are the Seller's formatting options for Form 65?"
+        
+    # Search example
+    print("\n" + "="*80)
+    print("SEARCH EXAMPLE")
+    print("="*80)
+    
+    print(f"\nSearching for: {question}")
+    
+    try:
+        results = client.search(question, k=3)
+        for result in results:
+            print(f"\n - {result['document_id']}: {result['title']} (score: {result['similarity_score']:.4f})")
+            print(f"Content: {result['content_preview']}...")
+    except Exception as e:
+        print(f"Error: {e}")
     
     # Query example
     print("\n" + "="*80)
     print("QUERY EXAMPLE")
     print("="*80)
     
-    question = "What is the required use of Form 65?"
-    print(f"\nQ: {question}")
+    print(f"\nQuestion: \n{question}")
     
     try:
         prompt, answer = client.query(question, k=3)
-        print(f"Prompt: {prompt}")
-        print(f"Answer: {answer}")
+        print("----------------------------------------------------------------------")
+        print(f"\nPrompt: \n{prompt}")
+        print("----------------------------------------------------------------------")
+        print(f"\nAnswer: \n{answer}")
     except Exception as e:
         print(f"Error: {e}")
     
-    # Search example
-    print("\n" + "="*80)
-    print("SEARCH EXAMPLE")
-    print("="*80)
     
-    search_query = "Form 65 formatting"
-    print(f"\nSearching for: {search_query}")
-    
-    try:
-        results = client.search(search_query, k=3)
-        for result in results:
-            print(f"  - {result['document_id']}: {result['title']} (score: {result['similarity_score']:.4f})")
-    except Exception as e:
-        print(f"Error: {e}")
 
 
 if __name__ == "__main__":
