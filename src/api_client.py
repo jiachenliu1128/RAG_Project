@@ -59,20 +59,22 @@ class RAG_API_Client:
         data = response.json()
         return data['embedding']
     
-    def search(self, query: str, k: int = 5) -> List[Dict]:
+    def search(self, query: str, k: int = 5, use_rerank: bool = False, initial_k: int = 20) -> List[Dict]:
         """
         Search for similar documents.
         
         Args:
             query: Search query
             k: Number of results
+            use_rerank: Whether to use re-ranking
+            initial_k: Number of candidates to retrieve before re-ranking
             
         Returns:
             List of search results
         """
         response = requests.post(
             f"{self.api_prefix}/search",
-            json={"query": query, "k": k}
+            json={"query": query, "k": k, "use_rerank": use_rerank, "initial_k": initial_k}
         )
         response.raise_for_status()
         data = response.json()
@@ -97,20 +99,22 @@ class RAG_API_Client:
         data = response.json()
         return data['results']
     
-    def query(self, question: str, k: int = 5) -> Tuple[str, str]:
+    def query(self, question: str, k: int = 5, use_rerank: bool = True, initial_k: int = 20) -> Tuple[str, str]:
         """
         Answer a question using RAG.
         
         Args:
             question: Question to answer
             k: Number of context documents
+            use_rerank: Whether to use re-ranking
+            initial_k: Number of candidates before re-ranking
             
         Returns:
             Tuple of (prompt, answer)
         """
         response = requests.post(
             f"{self.api_prefix}/query",
-            json={"question": question, "k": k}
+            json={"question": question, "k": k, "use_rerank": use_rerank, "initial_k": initial_k}
         )
         response.raise_for_status()
         data = response.json()

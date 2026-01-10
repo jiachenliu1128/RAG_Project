@@ -6,6 +6,9 @@ import json
 from transformers import GPT2TokenizerFast
 import dotenv
 from faiss_backend import FAISS_Backend
+from reranker import Reranker
+from logging_config import setup_logging, get_logger
+logger = get_logger(__name__)
 
 # =============================================================================
 # Configuration
@@ -46,7 +49,7 @@ SEPARATOR = "\n* "
 def load_data(csv_path: str) -> pd.DataFrame:
     """Load and preprocess the dataset."""
     df = pd.read_csv(csv_path, header=0)
-    print(f"{len(df)} rows in the data.")
+    logger.info(f"Loaded {len(df)} rows from {csv_path}")
     return df
 
 
@@ -139,7 +142,7 @@ def preprocess_dataset(df: pd.DataFrame, output_csv: str) -> pd.DataFrame:
     
     # Save to CSV
     df.to_csv(output_csv, index=False)
-    print(f"Preprocessed data saved to {output_csv}")
+    logger.info(f"Preprocessed data saved to {output_csv}")
     
     return df
 
@@ -180,7 +183,7 @@ def save_embeddings(embeddings: dict, filepath: str):
     """Save embeddings to JSON file."""
     with open(filepath, 'w') as fp:
         json.dump(embeddings, fp)
-    print(f"Embeddings saved to {filepath}")
+    logger.info(f"Embeddings saved to {filepath} ({len(embeddings)} entries)")
     
     
 def jsonKeys2int(x):
@@ -194,7 +197,7 @@ def load_embeddings(filepath: str) -> dict:
     """Load embeddings from JSON file."""
     with open(filepath, 'r') as fp:
         embeddings = json.load(fp, object_hook=jsonKeys2int)
-    print(f"Embeddings loaded from {filepath}")
+    logger.info(f"Loaded {len(embeddings)} embeddings from {filepath}")
     return embeddings
 
 
@@ -219,8 +222,12 @@ def vector_similarity(x, y):
 
 def order_document_sections_by_query_similarity(
     query: str, 
-    contexts: dict = None, 
-    faiss_backend: FAISS_Backend = None
+    df: pd.DataFrame = None,
+    context_embeddings: dict = None, 
+    faiss_backend: FAISS_Backend = None,
+    k: int = 5,
+    reranker: Reranker = None,
+    initial_k: int = 20
 ) -> list:
     """
     Find the query embedding for the supplied query, and compare it against all
@@ -228,22 +235,53 @@ def order_document_sections_by_query_similarity(
     
     Args:
         query: User query string
-        contexts: Dictionary of document embeddings
+        context_embeddings: Dictionary of document embeddings
         faiss_backend: FAISSBackend instance with indexed embeddings (optional)
+        k: Number of top documents to return (default 5)
+        reranker: Reranker instance for re-ranking results (optional)
+        df: DataFrame with document content (required if reranker is used)
+        initial_k: Number of candidates to retrieve before re-ranking (default 20)
         
     Returns:
         List of (similarity_score, doc_index) tuples sorted by relevance (descending)
     """
     query_embedding = get_embedding(query)
+    search_k = initial_k if reranker is not None else k
     
     if faiss_backend is not None:
-        document_similarities = faiss_backend.search(query_embedding)
-        document_similarities = [(score, doc_id) for doc_id, score in document_similarities]
+        # Retrieve more candidates if re-ranking
+        document_similarities = faiss_backend.search(query_embedding, k=search_k)
     else:
         document_similarities = sorted([
-            (vector_similarity(query_embedding, doc_embedding), doc_index)
-            for doc_index, doc_embedding in contexts.items()
-        ], reverse=True)
+            (doc_index, vector_similarity(query_embedding, doc_embedding))
+            for doc_index, doc_embedding in context_embeddings.items()
+        ], key=lambda x: x[1], reverse=True)[:search_k]
+    
+    # Apply re-ranking if reranker is provided
+    if reranker is not None and df is not None and len(document_similarities) > 0:
+        # Extract document contents for re-ranking
+        candidates = []
+        for doc_id, score in document_similarities:
+            if doc_id < len(df):
+                candidates.append({
+                    'doc_id': doc_id,
+                    'initial_score': score,
+                    'content': str(df.loc[doc_id]['content'])
+                })
+        
+        # Re-rank using cross-encoder
+        reranked = reranker.rerank_with_metadata(
+            query=query,
+            candidates=candidates,
+            text_field='content',
+            top_k=k
+        )
+        
+        # Return as (rerank_score, doc_id) tuples
+        document_similarities = [
+            (result['doc_id'], result['rerank_score']) 
+            for result in reranked
+        ]
     
     return document_similarities
 
@@ -262,7 +300,10 @@ def construct_prompt(
     question: str, 
     df: pd.DataFrame, 
     context_embeddings: dict = None, 
-    faiss_backend: FAISS_Backend = None
+    faiss_backend: FAISS_Backend = None,
+    k: int = 5,
+    reranker: Reranker = None,
+    initial_k: int = 20
 ) -> str:
     """
     Construct a prompt by retrieving relevant document sections and prepending them
@@ -270,15 +311,18 @@ def construct_prompt(
     
     Args:
         question: User's question
-        context_embeddings: Dictionary of document embeddings
         df: DataFrame with document content and token counts
+        context_embeddings: Dictionary of document embeddings
         faiss_backend: FAISSBackend instance with indexed embeddings (optional)
+        k: Number of context sections to include in the prompt (default 5)
+        reranker: Reranker instance for re-ranking results (optional)
+        initial_k: Number of candidates to retrieve before re-ranking (default 20)
         
     Returns:
         Constructed prompt with context and question
     """
     most_relevant_document_sections = order_document_sections_by_query_similarity(
-        question, context_embeddings, faiss_backend
+        question, df, context_embeddings, faiss_backend, k, reranker, initial_k
     )
     
     chosen_sections = []
@@ -289,7 +333,7 @@ def construct_prompt(
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     separator_len = len(tokenizer.tokenize(SEPARATOR))
     
-    for _, section_index in most_relevant_document_sections:
+    for section_index, _ in most_relevant_document_sections:
         # Add contexts until we run out of space.
         document_section = df.loc[section_index]
         
@@ -303,12 +347,14 @@ def construct_prompt(
         chosen_sections_indexes.append(str(section_index))
     
     # Useful diagnostic information
-    print(f"Selected {len(chosen_sections)} document sections:")
-    print("\n".join(chosen_sections_indexes))
+    logger.debug(f"Selected {len(chosen_sections)} document sections: {', '.join(chosen_sections_indexes)}")
     
     header = """Answer the question as truthfully as possible using the provided context, and if the answer is not contained within the text below, say "I don't know."\n\nContext:\n"""
     
     return header + "".join(chosen_sections) + "\n\n Q: " + question + "\n A:"
+
+
+
 
 
 
@@ -324,6 +370,9 @@ def answer_query_with_context(
     df: pd.DataFrame,
     document_embedding: dict = None,
     faiss_backend: FAISS_Backend = None,
+    k: int = 5,
+    reranker: Reranker = None,
+    initial_k: int = 20,
     show_prompt: bool = False
 ) -> str:
     """
@@ -334,6 +383,8 @@ def answer_query_with_context(
         df: DataFrame with document content
         document_embedding: Dictionary of document embeddings
         faiss_backend: FAISS_Backend instance with indexed embeddings
+        reranker: Reranker instance for re-ranking results (optional)
+        initial_k: Number of candidates to retrieve before re-ranking (default 20)
         show_prompt: If True, print the constructed prompt
         
     Returns:
@@ -341,11 +392,11 @@ def answer_query_with_context(
     """
     if document_embedding is None and faiss_backend is None:
         raise ValueError("Either document_embedding or faiss_backend must be provided.")
-    
-    prompt = construct_prompt(query, df, document_embedding, faiss_backend)
+     
+    prompt = construct_prompt(query, df, document_embedding, faiss_backend, k, reranker, initial_k)
     
     if show_prompt:
-        print(prompt)
+        logger.debug(f"Constructed prompt:\n{prompt}")
     
     response = client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
@@ -367,6 +418,8 @@ def answer_query_with_context(
 
 def main():
     """Main execution function."""
+    # Setup logging
+    setup_logging()
     
     # Paths
     data_dir = "./data"
@@ -375,26 +428,26 @@ def main():
     embeddings_path = f"{data_dir}/embeddings.json"
     
     # Load data
-    print("Loading data...")
+    logger.info("Loading data...")
     df = load_data(csv_path)
     
     # Preprocess dataset (create context, generate Q&A)
-    print("\nPreprocessing dataset...")
+    logger.info("Preprocessing dataset...")
     df = preprocess_dataset(df, processed_csv_path)
     
     # Compute and save embeddings
-    print("\nComputing embeddings...")
+    logger.info("Computing embeddings...")
     document_embeddings = compute_doc_embeddings(df)
     save_embeddings(document_embeddings, embeddings_path)
     
     # Display example embedding
     example_entry = list(document_embeddings.items())[0]
-    print(f"\nExample embedding: {example_entry[0]} : {example_entry[1][:5]}... ({len(example_entry[1])} entries)")
+    logger.info(f"Example embedding: {example_entry[0]} : {example_entry[1][:5]}... ({len(example_entry[1])} entries)")
     
     # Example queries
-    print("\n" + "="*80)
-    print("EXAMPLE QUERIES AND ANSWERS")
-    print("="*80)
+    logger.info("="*80)
+    logger.info("EXAMPLE QUERIES AND ANSWERS")
+    logger.info("="*80)
     
     test_queries = [
         "What is the required use of Form 65?",
@@ -404,10 +457,10 @@ def main():
     ]
     
     for query in test_queries:
-        print(f"\nQ: {query}")
+        logger.info(f"\nQ: {query}")
         answer, prompt = answer_query_with_context(query, df, document_embeddings)
-        print(f"A: {answer}")
-        print("-" * 80)
+        logger.info(f"A: {answer}")
+        logger.info("-" * 80)
 
 if __name__ == "__main__":
     main()

@@ -5,7 +5,8 @@ import pandas as pd
 import faiss
 import json
 from typing import List, Tuple, Dict
-
+from logging_config import get_logger
+logger = get_logger(__name__)
 
 # Avoid macOS libomp duplicate runtime crash when faiss/numpy load OpenMP
 if platform.system() == "Darwin":
@@ -28,6 +29,7 @@ class FAISS_Backend:
         self.id_mapping = {}  # Maps FAISS index IDs to document IDs
         self.reverse_id_mapping = {}  # Maps document IDs to FAISS index IDs
         self.embeddings = {}  # Stores embeddings for reference
+        logger.debug(f"Initialized FAISS_Backend with embedding_dim={embedding_dim}")
         
         
         
@@ -38,6 +40,7 @@ class FAISS_Backend:
         self.id_mapping = {}
         self.reverse_id_mapping = {}
         self.embeddings = {}
+        logger.info(f"Created new FAISS index with embedding_dim={self.embedding_dim}")
         
         
         
@@ -77,6 +80,7 @@ class FAISS_Backend:
             # Add to index
             self.index.add(embeddings_array)
         
+        logger.info(f"Added {len(doc_ids)} embeddings to FAISS index. Total: {self.index.ntotal}")
         return self.index.ntotal
     
     
@@ -93,6 +97,7 @@ class FAISS_Backend:
             List of (document_id, similarity_score) tuples sorted by relevance
         """
         if self.index is None or self.index.ntotal == 0:
+            logger.warning("Search called on empty or uninitialized index")
             return []
         
         query_array = np.array(query_embedding, dtype='float32').reshape(1, -1)
@@ -137,8 +142,8 @@ class FAISS_Backend:
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f)
         
-        print(f"Index saved to {index_path}")
-        print(f"Metadata saved to {metadata_path}")
+        logger.info(f"FAISS index saved to {index_path} ({self.index.ntotal} vectors)")
+        logger.info(f"Metadata saved to {metadata_path}")
         
         
         
@@ -160,8 +165,8 @@ class FAISS_Backend:
         self.id_mapping = {int(k): v for k, v in metadata['id_mapping'].items()}
         self.reverse_id_mapping = {int(k): v for k, v in metadata['reverse_id_mapping'].items()}
         
-        print(f"Index loaded from {index_path}")
-        print(f"Metadata loaded from {metadata_path}")
+        logger.info(f"FAISS index loaded from {index_path} ({self.index.ntotal} vectors)")
+        logger.info(f"Metadata loaded from {metadata_path}")
         
         
     
@@ -185,3 +190,4 @@ class FAISS_Backend:
         self.id_mapping = {}
         self.reverse_id_mapping = {}
         self.embeddings = {}
+        logger.info("FAISS index cleared")

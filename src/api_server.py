@@ -8,10 +8,13 @@ import json
 from functools import wraps
 
 from faiss_backend import FAISS_Backend
+from reranker import Reranker
 from rag_system import (
     load_data, preprocess_dataset, compute_doc_embeddings, 
     answer_query_with_context, get_embedding, save_embeddings, load_embeddings
 )
+from logging_config import setup_logging, get_logger
+logger = get_logger(__name__)
 
 
 # Avoid macOS libomp duplicate runtime crash when faiss/numpy load OpenMP
@@ -33,16 +36,18 @@ CORS(app)
 
 # Configuration
 DATA_DIR = "./data"
-CSV_PATH = f"{DATA_DIR}/Series4000.csv"
-PROCESSED_CSV_PATH = f"{DATA_DIR}/Series4000_processed.csv"
-EMBEDDINGS_PATH = f"{DATA_DIR}/embeddings.json"
-FAISS_INDEX_PATH = f"{DATA_DIR}/faiss_index.bin"
-FAISS_METADATA_PATH = f"{DATA_DIR}/faiss_metadata.json"
+DATA_FILE_STEM = "Series4000"
+CSV_PATH = f"{DATA_DIR}/{DATA_FILE_STEM}.csv"
+PROCESSED_CSV_PATH = f"{DATA_DIR}/{DATA_FILE_STEM}_processed.csv"
+EMBEDDINGS_PATH = f"{DATA_DIR}/{DATA_FILE_STEM}_embeddings.json"
+FAISS_INDEX_PATH = f"{DATA_DIR}/{DATA_FILE_STEM}_faiss_index.bin"
+FAISS_METADATA_PATH = f"{DATA_DIR}/{DATA_FILE_STEM}_faiss_metadata.json"
 
 # Global variables
 faiss_backend = None
 df = None
 embeddings_dict = None
+reranker = None
 
 
 
@@ -94,39 +99,45 @@ def initialize():
     Initialize the RAG system with FAISS backend.
     Loads data, preprocesses it, and creates the FAISS index.
     """
-    global faiss_backend, df, embeddings_dict
+    global faiss_backend, df, embeddings_dict, reranker
     
     try:
         # Initialize FAISS backend
+        logger.info("Initializing FAISS backend...")
         faiss_backend = FAISS_Backend(embedding_dim=len(get_embedding("")))
         
+        # Initialize reranker
+        logger.info("Initializing reranker...")
+        reranker = Reranker()
+        
         # Load data
-        print("Loading data...")
+        logger.info("Loading data...")
         df = load_data(CSV_PATH)
         
         # Preprocess dataset
-        print("Preprocessing dataset...")
+        logger.info("Preprocessing dataset...")
         df = preprocess_dataset(df, PROCESSED_CSV_PATH)
         
         # Load or compute embeddings
         if os.path.exists(EMBEDDINGS_PATH):
-            print("Loading embeddings...")
+            logger.info("Loading embeddings...")
             embeddings_dict = load_embeddings(EMBEDDINGS_PATH)
         else:
-            print("Computing embeddings...")
+            logger.info("Computing embeddings...")
             embeddings_dict = compute_doc_embeddings(df)
             save_embeddings(embeddings_dict, EMBEDDINGS_PATH)
             
         
         # Add embeddings to FAISS index
-        print("Building FAISS index...")
+        logger.info("Building FAISS index...")
         total = faiss_backend.add_embeddings(embeddings_dict)
         
         # Save FAISS index
-        print("Saving FAISS index...")
+        logger.info("Saving FAISS index...")
         faiss_backend.save_index(FAISS_INDEX_PATH, FAISS_METADATA_PATH)
         
         stats = faiss_backend.get_index_stats()
+        logger.info(f"System initialized successfully: {len(df)} rows, {total} embeddings")
         return jsonify({
             'status': 'success',
             'message': 'System initialized successfully',
@@ -136,6 +147,7 @@ def initialize():
         }), 200
         
     except Exception as e:
+        logger.error(f"Initialization failed: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': f'Initialization failed: {str(e)}'
@@ -145,7 +157,7 @@ def initialize():
 @app.route('/api/load-index', methods=['POST'])
 def load_index():
     """Load pre-built FAISS index from disk."""
-    global faiss_backend, df
+    global faiss_backend, df, reranker
     
     try:
         if not os.path.exists(FAISS_INDEX_PATH) or not os.path.exists(FAISS_METADATA_PATH):
@@ -158,10 +170,15 @@ def load_index():
         faiss_backend = FAISS_Backend()
         faiss_backend.load_index(FAISS_INDEX_PATH, FAISS_METADATA_PATH)
         
+        # Initialize reranker
+        logger.info("Initializing reranker...")
+        reranker = Reranker()
+        
         # Load dataframe
         df = pd.read_csv(PROCESSED_CSV_PATH)
         
         stats = faiss_backend.get_index_stats()
+        logger.info(f"Index loaded successfully: {stats['total_vectors']} vectors")
         return jsonify({
             'status': 'success',
             'message': 'Index loaded successfully',
@@ -220,6 +237,7 @@ def embed_text():
         }), 200
         
     except Exception as e:
+        logger.error(f"Embedding failed: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': f'Embedding failed: {str(e)}'
@@ -248,7 +266,9 @@ def search():
     Request body:
     {
         "query": "Your search query",
-        "k": 5  (optional, default 5)
+        "k": 5,  (optional, default 5)
+        "use_rerank": true,  (optional, default false)
+        "initial_k": 20  (optional, default 20, used when reranking)
     }
     """
     try:
@@ -258,12 +278,39 @@ def search():
         
         query = data['query']
         k = data.get('k', 5)
+        use_rerank = data.get('use_rerank', False)
+        initial_k = data.get('initial_k', 20)
+        
+        logger.debug(f"Search request: query='{query[:50]}...', k={k}, use_rerank={use_rerank}")
         
         # Get query embedding
         query_embedding = get_embedding(query)
         
-        # Search using FAISS
-        results = faiss_backend.search(query_embedding, k)
+        # Search using FAISS (retrieve more if re-ranking)
+        search_k = initial_k if use_rerank and reranker is not None else k
+        results = faiss_backend.search(query_embedding, search_k)
+        
+        # Apply re-ranking if requested
+        if use_rerank and reranker is not None:
+            candidates = []
+            for doc_id, similarity in results:
+                if doc_id < len(df):
+                    candidates.append({
+                        'doc_id': doc_id,
+                        'initial_score': similarity,
+                        'content': str(df.loc[doc_id].get('content', ''))
+                    })
+            
+            # Re-rank
+            reranked = reranker.rerank_with_metadata(
+                query=query,
+                candidates=candidates,
+                text_field='content',
+                top_k=k
+            )
+            
+            # Convert back to results format
+            results = [(r['doc_id'], r['rerank_score']) for r in reranked]
         
         # Build response with document context
         search_results = []
@@ -277,6 +324,7 @@ def search():
                     'content_preview': str(doc.get('content', ''))[:200]
                 })
         
+        logger.info(f"Search completed: {len(search_results)} results returned")
         return jsonify({
             'status': 'success',
             'query': query,
@@ -285,6 +333,7 @@ def search():
         }), 200
         
     except Exception as e:
+        logger.error(f"Search failed: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': f'Search failed: {str(e)}'
@@ -339,6 +388,7 @@ def search_embedding():
         }), 200
         
     except Exception as e:
+        logger.error(f"Search with embedding failed: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': f'Search failed: {str(e)}'
@@ -368,7 +418,9 @@ def query_rag():
     Request body:
     {
         "question": "Your question here",
-        "k": 5  (optional, number of context documents to use)
+        "k": 5,  (optional, number of context documents to use)
+        "use_rerank": true,  (optional, default true if reranker available)
+        "initial_k": 20  (optional, number of candidates before reranking)
     }
     """
     try:
@@ -378,10 +430,22 @@ def query_rag():
         
         question = data['question']
         k = data.get('k', 5)
+        use_rerank = data.get('use_rerank', reranker is not None)  # Use rerank by default if available
+        initial_k = data.get('initial_k', 20)
+        
+        logger.debug(f"Query request: question='{question[:50]}...', k={k}, use_rerank={use_rerank}")
         
         # Answer query using RAG
-        answer, prompt = answer_query_with_context(question, df, faiss_backend=faiss_backend)
+        answer, prompt = answer_query_with_context(
+            question, 
+            df, 
+            faiss_backend=faiss_backend,
+            k=k,
+            reranker=reranker if use_rerank else None,
+            initial_k=initial_k,
+        )
         
+        logger.info(f"Query completed successfully for question: '{question[:50]}...'")
         return jsonify({
             'status': 'success',
             'question': question,
@@ -390,6 +454,7 @@ def query_rag():
         }), 200
         
     except Exception as e:
+        logger.error(f"Query failed: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': f'Query failed: {str(e)}'
@@ -500,10 +565,15 @@ def internal_error(error):
 # =============================================================================
 
 if __name__ == '__main__':
+    # Setup logging
+    setup_logging(log_file='logs/api_server.log')
+    
     # Ensure data directory exists
     os.makedirs(DATA_DIR, exist_ok=True)
     
-    print("Starting RAG API Server...")
+    logger.info("Starting RAG API Server...")
+    logger.info(f"Data directory: {DATA_DIR}")
+    logger.info(f"Server will run on http://0.0.0.0:5001")
     
     # Run Flask app
     app.run(debug=True, host='0.0.0.0', port=5001)
