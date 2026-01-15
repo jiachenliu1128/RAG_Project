@@ -210,6 +210,57 @@ def load_embeddings(filepath: str) -> dict:
 # Retrieval and Similarity
 # =============================================================================
 
+def rewrite_query(original_query: str, style: str = "concise") -> str:
+    """
+    Rewrite the user's query to improve retrieval effectiveness.
+    Keeps key domain terms, expands acronyms, and adds likely synonyms.
+    Returns a single rewritten query string.
+    
+    Args:
+        original_query: The original user question or search query
+        style: "concise" or "expanded" for slight control over verbosity
+    
+    Returns:
+        Rewritten query string (falls back to original on error)
+    """
+    try:
+        # Construct system and user messages for the chat completion API
+        system_msg = (
+            "You are a query rewriting assistant for retrieval systems. "
+            "Rewrite the input into a retrieval-optimized query that preserves intent, "
+            "adds common terminology and synonyms, expands acronyms, and remains factual. "
+            "Do not answer the question. Output only the rewritten query."
+        )
+        user_msg = (
+            f"Style: {style}.\n"
+            "Constraints: <= 200 chars, keep key domain terms.\n"
+            f"Original: {original_query}"
+        )
+        
+        # Call the OpenAI Chat Completions API to rewrite the query
+        resp = client.chat.completions.create(
+            model=COMPLETIONS_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=100,
+        )
+        rewritten = resp.choices[0].message.content.strip()
+        
+        # Check if the rewritten query is empty
+        if not rewritten:
+            logger.warning("Empty rewrite result; using original query")
+            return original_query
+        logger.info(f"Query rewritten. Original: '{original_query}' | Rewritten: '{rewritten}'")
+        return rewritten
+    
+    except Exception as e:
+        logger.error(f"Query rewrite failed: {e}; using original", exc_info=True)
+        return original_query
+
+
 def vector_similarity(x, y):
     """
     Returns the similarity between two vectors.
@@ -303,7 +354,8 @@ def construct_prompt(
     faiss_backend: FAISS_Backend = None,
     k: int = 5,
     reranker: Reranker = None,
-    initial_k: int = 20
+    initial_k: int = 20,
+    retrieval_query: str | None = None
 ) -> str:
     """
     Construct a prompt by retrieving relevant document sections and prepending them
@@ -317,12 +369,14 @@ def construct_prompt(
         k: Number of context sections to include in the prompt (default 5)
         reranker: Reranker instance for re-ranking results (optional)
         initial_k: Number of candidates to retrieve before re-ranking (default 20)
+        retrieval_query: rewritten query to use for retrieval (optional)
         
     Returns:
         Constructed prompt with context and question
     """
+    effective_query = retrieval_query or question
     most_relevant_document_sections = order_document_sections_by_query_similarity(
-        question, df, context_embeddings, faiss_backend, k, reranker, initial_k
+        effective_query, df, context_embeddings, faiss_backend, k, reranker, initial_k
     )
     
     chosen_sections = []
@@ -373,6 +427,7 @@ def answer_query_with_context(
     k: int = 5,
     reranker: Reranker = None,
     initial_k: int = 20,
+    rewrite: bool = False,
     show_prompt: bool = False
 ) -> str:
     """
@@ -393,7 +448,17 @@ def answer_query_with_context(
     if document_embedding is None and faiss_backend is None:
         raise ValueError("Either document_embedding or faiss_backend must be provided.")
      
-    prompt = construct_prompt(query, df, document_embedding, faiss_backend, k, reranker, initial_k)
+    effective_query = rewrite_query(query) if rewrite else query
+    prompt = construct_prompt(
+        question=query,
+        df=df,
+        context_embeddings=document_embedding,
+        faiss_backend=faiss_backend,
+        k=k,
+        reranker=reranker,
+        initial_k=initial_k,
+        retrieval_query=effective_query,
+    )
     
     if show_prompt:
         logger.debug(f"Constructed prompt:\n{prompt}")

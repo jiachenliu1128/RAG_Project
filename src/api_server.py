@@ -11,7 +11,7 @@ from faiss_backend import FAISS_Backend
 from reranker import Reranker
 from rag_system import (
     load_data, preprocess_dataset, compute_doc_embeddings, 
-    answer_query_with_context, get_embedding, save_embeddings, load_embeddings
+    answer_query_with_context, get_embedding, save_embeddings, load_embeddings, rewrite_query
 )
 from logging_config import setup_logging, get_logger
 logger = get_logger(__name__)
@@ -33,6 +33,8 @@ if platform.system() == "Darwin":
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  
+host = '0.0.0.0'
+port = 5001
 
 # Configuration
 DATA_DIR = "./data"
@@ -48,6 +50,8 @@ faiss_backend = None
 df = None
 embeddings_dict = None
 reranker = None
+
+
 
 
 
@@ -267,8 +271,9 @@ def search():
     {
         "query": "Your search query",
         "k": 5,  (optional, default 5)
-        "use_rerank": true,  (optional, default false)
+        "use_rerank": true,  (optional, default true if reranker available)
         "initial_k": 20  (optional, default 20, used when reranking)
+        "rewrite": true  (optional, default false)
     }
     """
     try:
@@ -278,13 +283,17 @@ def search():
         
         query = data['query']
         k = data.get('k', 5)
-        use_rerank = data.get('use_rerank', False)
+        use_rerank = data.get('use_rerank', reranker is not None)
         initial_k = data.get('initial_k', 20)
+        rewrite = data.get('rewrite', False)
         
-        logger.debug(f"Search request: query='{query[:50]}...', k={k}, use_rerank={use_rerank}")
+        logger.debug(f"Search request: query='{query[:50]}...', k={k}, use_rerank={use_rerank}, rewrite={rewrite}")
+
+        # Optionally rewrite the query for retrieval
+        effective_query = rewrite_query(query) if rewrite else query
         
         # Get query embedding
-        query_embedding = get_embedding(query)
+        query_embedding = get_embedding(effective_query)
         
         # Search using FAISS (retrieve more if re-ranking)
         search_k = initial_k if use_rerank and reranker is not None else k
@@ -421,6 +430,7 @@ def query_rag():
         "k": 5,  (optional, number of context documents to use)
         "use_rerank": true,  (optional, default true if reranker available)
         "initial_k": 20  (optional, number of candidates before reranking)
+        "rewrite": true  (optional, default false)
     }
     """
     try:
@@ -430,10 +440,11 @@ def query_rag():
         
         question = data['question']
         k = data.get('k', 5)
-        use_rerank = data.get('use_rerank', reranker is not None)  # Use rerank by default if available
+        use_rerank = data.get('use_rerank', reranker is not None) 
         initial_k = data.get('initial_k', 20)
+        rewrite = data.get('rewrite', False) 
         
-        logger.debug(f"Query request: question='{question[:50]}...', k={k}, use_rerank={use_rerank}")
+        logger.debug(f"Query request: question='{question[:50]}...', k={k}, use_rerank={use_rerank}, rewrite={rewrite}")
         
         # Answer query using RAG
         answer, prompt = answer_query_with_context(
@@ -443,6 +454,7 @@ def query_rag():
             k=k,
             reranker=reranker if use_rerank else None,
             initial_k=initial_k,
+            rewrite=rewrite
         )
         
         logger.info(f"Query completed successfully for question: '{question[:50]}...'")
@@ -459,6 +471,46 @@ def query_rag():
             'status': 'error',
             'message': f'Query failed: {str(e)}'
         }), 500
+        
+        
+        
+        
+        
+        
+        
+ # =============================================================================
+# API Routes - Query Rewrite
+# =============================================================================
+
+@app.route('/api/rewrite', methods=['POST'])
+def api_rewrite():
+    """Rewrite a query to a retrieval-optimized form.
+    
+    Request body:
+    {
+        "query": "Your query here",
+        "style": "concise" or "expanded" (optional, default "concise")
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data or 'query' not in data:
+            return jsonify({'error': 'Missing "query" field in request'}), 400
+        
+        # Rewrite the query
+        style = data.get('style', 'concise')
+        rewritten = rewrite_query(data['query'], style=style)
+        
+        # Return the rewritten query
+        return jsonify({
+            'status': 'success',
+            'original': data['query'],
+            'rewritten': rewritten
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Rewrite endpoint failed: {str(e)}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 
@@ -476,7 +528,11 @@ def query_rag():
 
 @app.route('/api/documents/<int:doc_id>', methods=['GET'])
 def get_document(doc_id):
-    """Get full document content by ID."""
+    """Get full document content by ID.
+    
+    Args:
+        doc_id: Document ID
+    """
     if df is None or doc_id >= len(df) or doc_id < 0:
         return jsonify({'error': 'Document not found'}), 404
     
@@ -495,7 +551,14 @@ def get_document(doc_id):
 
 @app.route('/api/documents', methods=['GET'])
 def list_documents():
-    """List all documents with pagination."""
+    """List all documents with pagination.
+    
+    Request body:
+    {
+        "page": 1,  (optional, default 1)
+        "per_page": 10  (optional, default 10)
+    }
+    """
     if df is None:
         return jsonify({'error': 'No documents loaded'}), 400
     
@@ -573,7 +636,7 @@ if __name__ == '__main__':
     
     logger.info("Starting RAG API Server...")
     logger.info(f"Data directory: {DATA_DIR}")
-    logger.info(f"Server will run on http://0.0.0.0:5001")
+    logger.info(f"API Server running on http://{host}:{port}")
     
     # Run Flask app
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    app.run(debug=True, host=host, port=5001)
