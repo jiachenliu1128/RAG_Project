@@ -233,7 +233,7 @@ def rewrite_query(original_query: str, style: str = "concise") -> str:
         )
         user_msg = (
             f"Style: {style}.\n"
-            "Constraints: <= 200 chars, keep key domain terms.\n"
+            "Constraints: Keep key domain terms.\n"
             f"Original: {original_query}"
         )
         
