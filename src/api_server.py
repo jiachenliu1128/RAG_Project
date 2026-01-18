@@ -429,8 +429,9 @@ def query_rag():
         "question": "Your question here",
         "k": 5,  (optional, number of context documents to use)
         "use_rerank": true,  (optional, default true if reranker available)
-        "initial_k": 20  (optional, number of candidates before reranking)
-        "rewrite": true  (optional, default false)
+        "initial_k": 20,  (optional, number of candidates before reranking)
+        "rewrite": true,  (optional, default false)
+        "retrieval_decision": false  (optional, enable LLM-based retrieval decision)
     }
     """
     try:
@@ -442,9 +443,10 @@ def query_rag():
         k = data.get('k', 5)
         use_rerank = data.get('use_rerank', reranker is not None) 
         initial_k = data.get('initial_k', 20)
-        rewrite = data.get('rewrite', False) 
+        rewrite = data.get('rewrite', False)
+        retrieval_decision = data.get('retrieval_decision', False)
         
-        logger.debug(f"Query request: question='{question[:50]}...', k={k}, use_rerank={use_rerank}, rewrite={rewrite}")
+        logger.debug(f"Query request: question='{question[:50]}...', k={k}, use_rerank={use_rerank}, rewrite={rewrite}, retrieval_decision={retrieval_decision}")
         
         # Answer query using RAG
         answer, prompt = answer_query_with_context(
@@ -454,7 +456,8 @@ def query_rag():
             k=k,
             reranker=reranker if use_rerank else None,
             initial_k=initial_k,
-            rewrite=rewrite
+            rewrite=rewrite,
+            retrieval_decision=retrieval_decision
         )
         
         logger.info(f"Query completed successfully for question: '{question[:50]}...'")
@@ -462,7 +465,8 @@ def query_rag():
             'status': 'success',
             'question': question,
             'prompt': prompt,
-            'answer': answer
+            'answer': answer,
+            'retrieval_decision_used': retrieval_decision
         }), 200
         
     except Exception as e:
@@ -511,6 +515,7 @@ def api_rewrite():
     except Exception as e:
         logger.error(f"Rewrite endpoint failed: {str(e)}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 
 
